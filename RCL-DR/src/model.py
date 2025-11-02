@@ -1,3 +1,9 @@
+import torch
+import torch.nn.functional as F
+import numpy as np
+import scipy.sparse as sp
+import faiss
+
 class NCL(torch.nn.Module):
     def __init__(self, embedding_dim, n_layers, reg_weight, ssl_temp, ssl_reg, hyper_layers, alpha, proto_reg,
                  num_clusters, drug_disease_matrix, clip_grad_norm=None):
@@ -134,6 +140,7 @@ class NCL(torch.nn.Module):
 
         current_drug_embeddings = current_drug_embeddings[drug]
         previous_drug_embeddings = previous_drug_embeddings_all[drug]
+
         norm_drug_emb1 = F.normalize(current_drug_embeddings)
         norm_drug_emb2 = F.normalize(previous_drug_embeddings)
         norm_all_drug_emb = F.normalize(previous_drug_embeddings_all)
@@ -146,6 +153,7 @@ class NCL(torch.nn.Module):
 
         current_disease_embeddings = current_disease_embeddings[disease]
         previous_disease_embeddings = previous_disease_embeddings_all[disease]
+
         norm_disease_emb1 = F.normalize(current_disease_embeddings)
         norm_disease_emb2 = F.normalize(previous_disease_embeddings)
         norm_all_disease_emb = F.normalize(previous_disease_embeddings_all)
@@ -156,7 +164,7 @@ class NCL(torch.nn.Module):
 
         ssl_loss_disease = -torch.log(pos_score_disease / ttl_score_disease).sum()
 
-        ssl_loss = self.ssl_reg * (ssl_loss_drug + self.alpha * ssl_loss_disease)
+        ssl_loss = ssl_loss_drug + self.alpha * ssl_loss_disease
         return ssl_loss
 
     def calculate_loss(self, interaction, norm_adj):
@@ -173,6 +181,7 @@ class NCL(torch.nn.Module):
         context_embedding = embeddings_list[self.hyper_layers * 2]
 
         ssl_loss = self.ssl_layer_loss(context_embedding, center_embedding, drug, pos_disease)
+
         proto_loss = self.ProtoNCE_loss(center_embedding, drug, pos_disease)
 
         r_embeddings = drug_all_embeddings[drug]
@@ -190,14 +199,14 @@ class NCL(torch.nn.Module):
 
         reg_loss = self.reg_loss(r_ego_embeddings, pos_ego_embeddings, neg_ego_embeddings)
 
-        total_loss = mf_loss + self.reg_weight * reg_loss + ssl_loss + proto_loss
+        total_loss = mf_loss + self.reg_weight * reg_loss + self.ssl_reg * ssl_loss + proto_loss
 
         return total_loss
 
     def predict(self, interaction):
         drug = interaction['drug'].to(self.device)
         disease = interaction['disease'].to(self.device)
-        drug_all_embeddings, disease_all_embeddings, embeddings_list = self.forward()
+        drug_all_embeddings, disease_all_embeddings, embeddings_list = self.forward(self.norm_adj_mat)
         r_embeddings = drug_all_embeddings[drug]
         d_embeddings = disease_all_embeddings[disease]
         scores = torch.mul(r_embeddings, d_embeddings).sum(dim=1)
@@ -206,7 +215,7 @@ class NCL(torch.nn.Module):
     def full_sort_predict(self, interaction):
         drug = interaction['drug'].to(self.device)
         if self.restore_drug_e is None or self.restore_disease_e is None:
-            self.restore_drug_e, self.restore_disease_e, embedding_list = self.forward()
+            self.restore_drug_e, self.restore_disease_e, embedding_list = self.forward(self.norm_adj_mat)
         r_embeddings = self.restore_drug_e[drug]
         scores = torch.matmul(r_embeddings, self.restore_disease_e.transpose(0, 1))
         return scores.view(-1)
